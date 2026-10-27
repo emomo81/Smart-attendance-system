@@ -22,7 +22,8 @@ load_dotenv()
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "")
 ROBOFLOW_MODEL_ID = os.getenv("ROBOFLOW_MODEL_ID", "face-detection-bj0ij/1")
 ROBOFLOW_API_URL = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com")
-ROBOFLOW_CONFIDENCE = float(os.getenv("ROBOFLOW_CONFIDENCE", "0.4"))
+ROBOFLOW_CONFIDENCE = float(os.getenv("ROBOFLOW_CONFIDENCE", "0.4"))  # default when the request sends none
+MIN_CONFIDENCE, MAX_CONFIDENCE = 0.1, 0.9
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "http://localhost:3000")
 LOG_PATH = os.getenv("LOG_PATH", os.path.join(os.path.dirname(__file__), "logs", "attendance_log.csv"))
 
@@ -54,7 +55,9 @@ def get_roboflow_client():
         from inference_sdk import InferenceConfiguration, InferenceHTTPClient
 
         client = InferenceHTTPClient(api_url=ROBOFLOW_API_URL, api_key=ROBOFLOW_API_KEY)
-        client.configure(InferenceConfiguration(confidence_threshold=ROBOFLOW_CONFIDENCE))
+        # Ask for everything above the slider's floor and filter per request in roboflow_to_boxes,
+        # so concurrent requests with different confidences never change shared client state.
+        client.configure(InferenceConfiguration(confidence_threshold=MIN_CONFIDENCE))
         _roboflow_client = client
     return _roboflow_client
 
@@ -65,14 +68,16 @@ def detect_haar(image, min_neighbors):
     return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
 
 
-def roboflow_to_boxes(result):
+def roboflow_to_boxes(result, confidence):
     """Convert Roboflow centre-based predictions to (left, top, width, height).
 
     The model's only class is literally "Face Detection - v21 YOLOv5s", so every
-    prediction counts as a face; we do not filter on class == "face".
+    prediction at or above `confidence` counts as a face; we do not filter on class == "face".
     """
     boxes = []
     for p in result.get("predictions", []):
+        if float(p.get("confidence", 1.0)) < confidence:
+            continue
         width, height = float(p["width"]), float(p["height"])
         left = float(p["x"]) - width / 2
         top = float(p["y"]) - height / 2
@@ -80,11 +85,11 @@ def roboflow_to_boxes(result):
     return boxes
 
 
-def detect_roboflow(image):
+def detect_roboflow(image, confidence):
     result = get_roboflow_client().infer(image, model_id=ROBOFLOW_MODEL_ID)
     if isinstance(result, list):
         result = result[0]
-    return roboflow_to_boxes(result)
+    return roboflow_to_boxes(result, confidence)
 
 
 def draw_boxes(image, boxes):
@@ -157,13 +162,18 @@ def detect():
     except ValueError:
         return jsonify(error="min_neighbors must be a whole number."), 400
     min_neighbors = max(3, min(9, min_neighbors))
+    try:
+        confidence = float(request.form.get("confidence", ROBOFLOW_CONFIDENCE))
+    except ValueError:
+        return jsonify(error="confidence must be a number between 0.1 and 0.9."), 400
+    confidence = max(MIN_CONFIDENCE, min(MAX_CONFIDENCE, confidence))
 
     image = decode_image(upload)
     if image is None:
         return jsonify(error="The file could not be read as an image."), 400
 
     try:
-        boxes = detect_haar(image, min_neighbors) if method == "haar" else detect_roboflow(image)
+        boxes = detect_haar(image, min_neighbors) if method == "haar" else detect_roboflow(image, confidence)
     except ValueError as error:
         return jsonify(error=str(error)), 503
     except Exception as error:  # network/API errors from Roboflow
@@ -185,6 +195,7 @@ def detect():
         method=method,
         source=source,
         min_neighbors=min_neighbors if method == "haar" else None,
+        confidence=confidence if method == "roboflow" else None,
         record=record,
     )
 

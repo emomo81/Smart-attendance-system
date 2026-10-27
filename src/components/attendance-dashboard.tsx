@@ -25,6 +25,10 @@ const SAMPLE_IMAGE = "/images/classroom-sample.jpg";
 const SAMPLE_INTERVAL_MS = 2_000;
 const MAX_VIDEO_SAMPLES = 60;
 const MAX_FRAME_WIDTH = 1280;
+// Roboflow confidence in percent; the backend clamps to the same 10–90 range.
+const DEFAULT_CONFIDENCE = 40;
+const MIN_CONFIDENCE = 10;
+const MAX_CONFIDENCE = 90;
 const MODE_LABELS: Record<LogSource, string> = { photo: "Photo", video: "Video", webcam: "Webcam" };
 const METHOD_LABELS: Record<DetectionMethod, string> = { haar: "Haar cascade", roboflow: "Roboflow" };
 
@@ -153,6 +157,7 @@ export default function AttendanceDashboard() {
   const [mode, setMode] = useState<LogSource>("photo");
   const [method, setMethod] = useState<DetectionMethod>("haar");
   const [minNeighbors, setMinNeighbors] = useState(5);
+  const [confidence, setConfidence] = useState(DEFAULT_CONFIDENCE);
   const [autoLog, setAutoLog] = useState(true);
   const [backendStatus, setBackendStatus] = useState<"checking" | "ready" | "offline">("checking");
   const [roboflowConfigured, setRoboflowConfigured] = useState(false);
@@ -177,10 +182,10 @@ export default function AttendanceDashboard() {
   const videoUrlRef = useRef<string | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
   // Keep the latest settings readable from the webcam interval without restarting it.
-  const settingsRef = useRef({ method, minNeighbors, autoLog });
+  const settingsRef = useRef({ method, minNeighbors, confidence, autoLog });
   useEffect(() => {
-    settingsRef.current = { method, minNeighbors, autoLog };
-  }, [method, minNeighbors, autoLog]);
+    settingsRef.current = { method, minNeighbors, confidence, autoLog };
+  }, [method, minNeighbors, confidence, autoLog]);
 
   const showNotice = useCallback((message: string, tone: "success" | "error" = "success") => {
     setNotice({ message, tone });
@@ -189,12 +194,13 @@ export default function AttendanceDashboard() {
   }, []);
 
   const detect = useCallback(async (image: Blob, source: LogSource): Promise<DetectionResult> => {
-    const { method: currentMethod, minNeighbors: neighbors, autoLog: shouldLog } = settingsRef.current;
+    const { method: currentMethod, minNeighbors: neighbors, confidence: minConfidence, autoLog: shouldLog } = settingsRef.current;
     const form = new FormData();
     form.append("image", image, "frame.jpg");
     form.append("method", currentMethod);
     form.append("source", source);
     form.append("min_neighbors", String(neighbors));
+    form.append("confidence", String(minConfidence / 100));
     form.append("log", String(shouldLog));
     const response = await fetch(`${API_URL}/detect`, { method: "POST", body: form });
     const data = (await response.json().catch(() => ({}))) as Partial<DetectionResult> & { error?: string };
@@ -647,7 +653,23 @@ export default function AttendanceDashboard() {
                     <div className="setting-foot"><span>Scale factor <strong>1.1</strong></span><span className="default-pill">{minNeighbors === 5 ? "ASSIGNMENT DEFAULT" : "CUSTOM"}</span></div>
                   </>
                 ) : (
-                  <div className="setting-foot"><span>Confidence <strong>40%</strong></span><span className="default-pill">HOSTED MODEL</span></div>
+                  <>
+                    <div className="neighbor-row"><label htmlFor="confidence">Confidence threshold</label><span className="neighbor-value">{confidence}%</span></div>
+                    <input
+                      id="confidence"
+                      className="neighbor-slider"
+                      type="range"
+                      min={MIN_CONFIDENCE}
+                      max={MAX_CONFIDENCE}
+                      step="5"
+                      value={confidence}
+                      onChange={(event) => setConfidence(Number(event.target.value))}
+                      style={{ "--slider-progress": `${((confidence - MIN_CONFIDENCE) / (MAX_CONFIDENCE - MIN_CONFIDENCE)) * 100}%` } as React.CSSProperties}
+                      aria-valuetext={`${confidence} percent confidence`}
+                    />
+                    <div className="slider-scale"><span>More detections</span><span>Fewer false positives</span></div>
+                    <div className="setting-foot"><span>Hosted model <strong>bj0ij/1</strong></span><span className="default-pill">{confidence === DEFAULT_CONFIDENCE ? "DEFAULT" : "CUSTOM"}</span></div>
+                  </>
                 )}
               </article>
             </div>
@@ -695,7 +717,7 @@ export default function AttendanceDashboard() {
           <section className="method-note" id="method" aria-label="Detection method">
             <div className="method-note-icon"><Icon name="shield" size={17} /></div>
             <div><strong>What this tool does—and doesn’t do</strong><span>Haar cascade (OpenCV) or a hosted Roboflow face model counts visible faces. It does not identify people or make attendance decisions, and images are not stored. Check difficult lighting and angled views before relying on a count.</span></div>
-            <div className="method-spec">{method === "haar" ? <><span>GRAYSCALE</span><span>·</span><span>1.1 SCALE FACTOR</span><span>·</span><span>{minNeighbors} NEIGHBORS</span></> : <><span>ROBOFLOW</span><span>·</span><span>CONFIDENCE 40%</span></>}</div>
+            <div className="method-spec">{method === "haar" ? <><span>GRAYSCALE</span><span>·</span><span>1.1 SCALE FACTOR</span><span>·</span><span>{minNeighbors} NEIGHBORS</span></> : <><span>ROBOFLOW</span><span>·</span><span>CONFIDENCE {confidence}%</span></>}</div>
           </section>
 
           <footer className="page-footer"><span>Made for learning, not surveillance.</span><span>Rollcall <span>·</span> G1 Smart Attendance System</span></footer>
